@@ -53,7 +53,7 @@ def mutate(length, entry, key):
     decrypter[7] = decrypter[7][:2] + [(0xff & (key >> (8 * x))) for x in range(4)] + decrypter[7][2 + 4:]
 
     # start inserting goop
-    for i in range(4):
+    for i in range(10):
         cruft = random.choice(CRUFT)
         # Start at 1 so we know where out "call 5" is going to be
         # TODO: work around this by juggling the sub operation later on
@@ -109,7 +109,7 @@ def get_characteristics(bitfield):
     return result
 
 def derp():
-    print('USAGE: {0} TARGET')
+    print('USAGE: python {0} TARGET'.format(sys.argv[0]))
     print('  TARGET: target PE file')
     sys.exit(1)
     
@@ -121,8 +121,9 @@ if __name__ == '__main__':
     """
     print('Entry point    : {0:#010x}'.format(pe.OPTIONAL_HEADER.AddressOfEntryPoint))
     print('Characteristics: {0}'.format(pe.FILE_HEADER.Characteristics))
-    """
+
     print('\nSections:')
+    """
     target_section = None
     for section in pe.sections:
         """
@@ -136,12 +137,8 @@ if __name__ == '__main__':
         if target_section is None and section.Characteristics & (pefile.SECTION_CHARACTERISTICS['IMAGE_SCN_CNT_CODE'] | pefile.SECTION_CHARACTERISTICS['IMAGE_SCN_MEM_EXECUTE']):
             target_section = section
 
-    print('')
-    print('Targetting section: ' + target_section.Name)
-    print('Space available   : {0} bytes'.format(target_section.SizeOfRawData - target_section.Misc_VirtualSize))
+    print('\nTargeted section  : ' + target_section.Name)
     
-    # TODO: bail, or expand section if we don't have enough space
-
     random.seed()
     key = random.randint(0, 0xffffffff)
     length = target_section.Misc_VirtualSize
@@ -153,6 +150,14 @@ if __name__ == '__main__':
     
     shellcode = mutate(length, entry, key)
     
+    print('Decrypter size    : {0} bytes'.format(len(shellcode)))
+    print('Space available   : {0} bytes'.format(target_section.SizeOfRawData - target_section.Misc_VirtualSize))
+    
+    # TODO: bail, or expand section if we don't have enough space
+    if len(shellcode) > target_section.SizeOfRawData - target_section.Misc_VirtualSize:
+        print('\n** Not enough space in target section. Bailing.')
+        sys.exit(2)
+
     # Stuff new code into the back of the section
     file_offset = target_section.PointerToRawData + target_section.Misc_VirtualSize
     pe.set_bytes_at_offset(file_offset, str(shellcode))
@@ -181,4 +186,6 @@ if __name__ == '__main__':
     pe.FILE_HEADER.Characteristics |= pefile.IMAGE_CHARACTERISTICS['IMAGE_FILE_RELOCS_STRIPPED']
     
     pe.write(filename = '{0}.{1:08x}.exe'.format(target_file, key))
+    
+    print('\nDONE')
     
