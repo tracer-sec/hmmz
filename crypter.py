@@ -44,24 +44,24 @@ CRUFT = [
 def mutate(length, entry, key):
     decrypter = DECRYPTER
     jmp_offsets = JMP_OFFSETS
-
-    length = length - 1
     
     # replace length, entry point and key values
-    decrypter[4] = decrypter[4][:2] + [(0xff & (length >> (8 * x))) for x in range(4)] + decrypter[4][2 + 4:]
+    decrypter[4] = decrypter[4][:2] + [(0xff & ((length - 1) >> (8 * x))) for x in range(4)] + decrypter[4][2 + 4:]
     decrypter[6] = decrypter[6][:1] + [(0xff & (entry >> (8 * x))) for x in range(4)] + decrypter[6][1 + 4:]
     decrypter[7] = decrypter[7][:2] + [(0xff & (key >> (8 * x))) for x in range(4)] + decrypter[7][2 + 4:]
 
     # start inserting goop
-    for i in range(10):
+    for i in range(170):
         cruft = random.choice(CRUFT)
-        # Start at 1 so we know where out "call 5" is going to be
+        
+        # Start at 1 so we know where our "call 5" is going to be
         # TODO: work around this by juggling the sub operation later on
         insert_index = random.randint(1, len(decrypter))
         insert_offset = reduce(lambda a, x: a + len(x), decrypter[:insert_index], 0)
         
-        # Now we need to wriggle the values and offsets for our JMPS
+        # Now we need to wriggle the values and offsets for our JMPs
         # so we don't go missing once we insert the cruft
+        # TODO: we need to handle if our offsets become too large for short jumps
         for offset in jmp_offsets:
             current_jmp_target = offset[0] + offset[1] + 1
 
@@ -112,6 +112,7 @@ def derp():
     print('USAGE: python {0} TARGET'.format(sys.argv[0]))
     print('  TARGET: target PE file')
     sys.exit(1)
+       
     
 if __name__ == '__main__':
     if len(sys.argv) < 2:
@@ -125,6 +126,7 @@ if __name__ == '__main__':
     print('\nSections:')
     """
     target_section = None
+    target_index = 0
     for section in pe.sections:
         """
         print(' ' + section.Name)
@@ -136,6 +138,8 @@ if __name__ == '__main__':
         # TODO: this should really check if it contains the entry point instead
         if target_section is None and section.Characteristics & (pefile.SECTION_CHARACTERISTICS['IMAGE_SCN_CNT_CODE'] | pefile.SECTION_CHARACTERISTICS['IMAGE_SCN_MEM_EXECUTE']):
             target_section = section
+            break
+        target_index = target_index + 1
 
     print('\nTargeted section  : ' + target_section.Name)
     
@@ -143,6 +147,7 @@ if __name__ == '__main__':
     key = random.randint(0, 0xffffffff)
     length = target_section.Misc_VirtualSize
     entry = pe.OPTIONAL_HEADER.AddressOfEntryPoint - target_section.VirtualAddress
+    original_size = target_section.Misc_VirtualSize
     
     print('Key               : {0:#010x}'.format(key))
     print('Length            : {0:#x}'.format(length))
@@ -150,42 +155,65 @@ if __name__ == '__main__':
     
     shellcode = mutate(length, entry, key)
     
+    print('Original code size: {0} bytes'.format(original_size))
     print('Decrypter size    : {0} bytes'.format(len(shellcode)))
     print('Space available   : {0} bytes'.format(target_section.SizeOfRawData - target_section.Misc_VirtualSize))
-    
-    # TODO: bail, or expand section if we don't have enough space
-    if len(shellcode) > target_section.SizeOfRawData - target_section.Misc_VirtualSize:
-        print('\n** Not enough space in target section. Bailing.')
-        sys.exit(2)
 
-    # Stuff new code into the back of the section
-    file_offset = target_section.PointerToRawData + target_section.Misc_VirtualSize
-    pe.set_bytes_at_offset(file_offset, str(shellcode))
-    
-    # Update the Entry point
-    pe.OPTIONAL_HEADER.AddressOfEntryPoint = target_section.VirtualAddress + target_section.Misc_VirtualSize
+    # Expand the section and bump all of the section offsets if necessary
+    offset_shim = 0
+    while target_section.Misc_VirtualSize + len(shellcode) > target_section.SizeOfRawData + offset_shim:
+        offset_shim = offset_shim + pe.OPTIONAL_HEADER.FileAlignment
         
+    print('\nExpanding code section {0} bytes\n'.format(offset_shim))
+    
+    # Add a block of data to the end of the file
+    pe.__data__ = (pe.__data__[:len(pe.__data__)] + '\0' * offset_shim)
+    
+    # Move all the affected section data and update pointers
+    for i in xrange(len(pe.sections) - 1, target_index, -1):
+        section = pe.sections[i]
+        print('{0}{1}: {2} -> {3}'.format(section.Name, ' ' * (16 -  len(section.Name)), section.PointerToRawData, section.PointerToRawData + offset_shim))
+        data = section.get_data()
+        pe.set_bytes_at_offset(section.PointerToRawData + offset_shim, data)
+        pe.sections[i].PointerToRawData += offset_shim    
+        
+    # Stuff new code into the back of the section
+    target_section.Misc_VirtualSize += len(shellcode)
+    target_section.SizeOfRawData += offset_shim
+    
+    file_offset = target_section.PointerToRawData + original_size
+    pe.set_bytes_at_offset(file_offset, str(shellcode))
+
     # And now 'encrypt' the existing code
     buffer = bytearray(target_section.get_data())
     key_index = 0
     buffer_index = 0
-    for buffer_index in xrange(target_section.Misc_VirtualSize):
+    for buffer_index in xrange(original_size):
         buffer[buffer_index] ^= (key >> (key_index * 8)) & 0xff
         key_index = (key_index + 1) % 4
-        
     pe.set_bytes_at_offset(target_section.PointerToRawData, str(buffer))
-    
-    # Update the section size
-    target_section.Misc_VirtualSize += len(shellcode)
     
     # Mark the section as writable
     target_section.Characteristics |= pefile.SECTION_CHARACTERISTICS['IMAGE_SCN_MEM_WRITE']
+
+    # Update the Entry point
+    pe.OPTIONAL_HEADER.AddressOfEntryPoint = target_section.VirtualAddress + original_size
+
+    # Tweak SizeOfCode in file header
+    pe.OPTIONAL_HEADER.SizeOfCode += offset_shim
     
     # Strip relocations, since it tweaks the code as it's loaded to account 
     # for the base addresses and this will break our encryption
     pe.FILE_HEADER.Characteristics |= pefile.IMAGE_CHARACTERISTICS['IMAGE_FILE_RELOCS_STRIPPED']
     
-    pe.write(filename = '{0}.{1:08x}.exe'.format(target_file, key))
+    # Finally, fuck with the internals of pefile to make sure our file offsets
+    # are correct
+    for structure in pe.__structures__:
+        if structure.get_file_offset() > target_section.PointerToRawData + original_size:
+            structure.__file_offset__ += offset_shim
+
+    output_filename = '{0}.{1:08x}.exe'.format(target_file, key)
+    pe.write(filename = output_filename)
     
-    print('\nDONE')
+    print('\nDONE - ' + output_filename)
     
