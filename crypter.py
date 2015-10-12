@@ -11,15 +11,15 @@ DECRYPTER = [
     [ 0x89, 0xc8 ],                             # mov eax, ecx
     [ 0x05, 0x22, 0x22, 0x22, 0x22 ],           # add eax, 0x22222222
     [ 0x81, 0x31, 0x33, 0x33, 0x33, 0x33 ],     # loop: xor dword [ecx], 0x33333333
-    [ 0x39, 0xd1, 0x7d, 0x05 ],                 # cmp ecx, edx      jge out ; can't separate these
+    [ 0x39, 0xd1, 0x0f, 0x8d, 0x05, 0x00, 0x00, 0x00 ],  # cmp ecx, edx  |  jge out ; can't separate these
     [ 0x83, 0xc1, 0x04 ],                       # add ecx, 4
-    [ 0xeb, 0xf1 ],                             # jmp loop
+    [ 0xe9, 0xe7, 0xff, 0xff, 0xff ],           # jmp loop
     [ 0xff, 0xe0 ]                              # out: jmp eax
 ]
 
 JMP_OFFSETS = [
-    [ 0x21, 5 ],
-    [ 0x26, -15 ]
+    [ 0x22, 8 ],
+    [ 0x2a, -19 ]
 ]
 
 CRUFT = [
@@ -41,17 +41,19 @@ CRUFT = [
     [ 0x83, 0xe2, 0xff ],   # and edx, 0xffffffff 
 ]
 
+encode_int32 = lambda x: [(0xff & (x >> (8 * i))) for i in range(4)]
+
 def mutate(length, entry, key):
     decrypter = DECRYPTER
     jmp_offsets = JMP_OFFSETS
     
     # replace length, entry point and key values
-    decrypter[4] = decrypter[4][:2] + [(0xff & ((length - 1) >> (8 * x))) for x in range(4)] + decrypter[4][2 + 4:]
-    decrypter[6] = decrypter[6][:1] + [(0xff & (entry >> (8 * x))) for x in range(4)] + decrypter[6][1 + 4:]
-    decrypter[7] = decrypter[7][:2] + [(0xff & (key >> (8 * x))) for x in range(4)] + decrypter[7][2 + 4:]
+    decrypter[4] = decrypter[4][:2] + encode_int32(length - 1) + decrypter[4][2 + 4:]
+    decrypter[6] = decrypter[6][:1] + encode_int32(entry) + decrypter[6][1 + 4:]
+    decrypter[7] = decrypter[7][:2] + encode_int32(key) + decrypter[7][2 + 4:]
 
     # start inserting goop
-    for i in range(170):
+    for i in range(500):
         cruft = random.choice(CRUFT)
         
         # Start at 1 so we know where our "call 5" is going to be
@@ -83,9 +85,9 @@ def mutate(length, entry, key):
     # replace the jmp values 
     for offset in jmp_offsets:
         if offset[1] > 0:
-            final[offset[0]] = offset[1]
+            final = final[:offset[0]] + encode_int32(offset[1]) + final[offset[0] + 4:]
         else:
-            final[offset[0]] = offset[1] & 0xff
+            final = final[:offset[0]] + encode_int32(offset[1] & 0xffffffff) + final[offset[0] + 4:]
 
     '''
     for l in decrypter:
