@@ -19,7 +19,7 @@ DECRYPTER = [
 
 JMP_OFFSETS = [
     [ 0x22, 8 ],
-    [ 0x2a, -19 ]
+    [ 0x2a, -22 ]
 ]
 
 CRUFT = [
@@ -42,6 +42,7 @@ CRUFT = [
 ]
 
 encode_int32 = lambda x: [(0xff & (x >> (8 * i))) for i in range(4)]
+twos_comp = lambda x: x - (1 << 32)
 
 def mutate(length, entry, key):
     decrypter = DECRYPTER
@@ -63,9 +64,8 @@ def mutate(length, entry, key):
         
         # Now we need to wriggle the values and offsets for our JMPs
         # so we don't go missing once we insert the cruft
-        # TODO: we need to handle if our offsets become too large for short jumps
         for offset in jmp_offsets:
-            current_jmp_target = offset[0] + offset[1] + 1
+            current_jmp_target = offset[0] + offset[1] + 4
 
             if offset[1] > 0:
                 if offset[0] <= insert_offset and current_jmp_target >= insert_offset:
@@ -87,8 +87,8 @@ def mutate(length, entry, key):
         if offset[1] > 0:
             final = final[:offset[0]] + encode_int32(offset[1]) + final[offset[0] + 4:]
         else:
-            final = final[:offset[0]] + encode_int32(offset[1] & 0xffffffff) + final[offset[0] + 4:]
-
+            final = final[:offset[0]] + encode_int32(twos_comp(offset[1])) + final[offset[0] + 4:]
+            
     '''
     for l in decrypter:
         print(map(hex, l))
